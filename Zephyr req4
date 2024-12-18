@@ -1,0 +1,208 @@
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.io.FileWriter;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.util.ArrayList;
+import java.util.List;
+
+public class ZephyrMetricsFetcher {
+    private static final String ACCESS_TOKEN = "your_access_token_here";
+    private static final String BASE_URL = "https://api.zephyrscale.smartbear.com/v2";
+    private static final int RELEASE_ID = 13642; // Replace with your release ID
+    private final HttpClient client;
+
+    static class FolderInfo {
+        int id;
+        String name;
+    }
+
+    static class FolderSummary {
+        String folderName;
+        int totalRequirements;
+        int requirementsWithTests;
+        int requirementsWithoutTests;
+        double coveragePercentage;
+    }
+
+    public ZephyrMetricsFetcher() {
+        this.client = HttpClient.newHttpClient();
+    }
+
+    private JSONObject makeApiRequest(String url) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header("Authorization", "Bearer " + ACCESS_TOKEN)
+            .header("Accept", "application/json")
+            .GET()
+            .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new RuntimeException("API request failed for URL " + url + " with status: " + response.statusCode());
+        }
+        
+        return new JSONObject(response.body());
+    }
+
+    private JSONArray makeApiArrayRequest(String url) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header("Authorization", "Bearer " + ACCESS_TOKEN)
+            .header("Accept", "application/json")
+            .GET()
+            .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new RuntimeException("API request failed for URL " + url + " with status: " + response.statusCode());
+        }
+        
+        return new JSONArray(response.body());
+    }
+
+    private int getParentFolderId() throws Exception {
+        String url = String.format("%s/folders?releaseId=%d", BASE_URL, RELEASE_ID);
+        JSONArray response = makeApiArrayRequest(url);
+        
+        // Get the first folder's ID as it's the parent folder
+        if (response.length() > 0) {
+            JSONObject parentFolder = response.getJSONObject(0);
+            System.out.println("Found parent folder: " + parentFolder.getString("name"));
+            return parentFolder.getInt("id");
+        }
+        
+        throw new RuntimeException("No parent folder found for release ID: " + RELEASE_ID);
+    }
+
+    private List<FolderInfo> getSubfolders(int parentFolderId) throws Exception {
+        List<FolderInfo> folders = new ArrayList<>();
+        String url = String.format("%s/folders/%d", BASE_URL, parentFolderId);
+        JSONObject parentFolder = makeApiRequest(url);
+        
+        JSONArray categories = parentFolder.getJSONArray("categories");
+        for (int i = 0; i < categories.length(); i++) {
+            JSONObject category = categories.getJSONObject(i);
+            FolderInfo folder = new FolderInfo();
+            folder.id = category.getInt("id");
+            folder.name = category.getString("name");
+            folders.add(folder);
+        }
+        
+        return folders;
+    }
+
+    private FolderSummary analyzeFolderRequirements(JSONObject response, String folderName) {
+        FolderSummary summary = new FolderSummary();
+        summary.folderName = folderName;
+        summary.totalRequirements = response.getInt("resultSize");
+        
+        JSONArray requirements = response.getJSONArray("results");
+        summary.requirementsWithTests = 0;
+
+        for (int i = 0; i < requirements.length(); i++) {
+            JSONObject req = requirements.getJSONObject(i);
+            if (req.has("testcaseIds") && !req.getJSONArray("testcaseIds").isEmpty()) {
+                summary.requirementsWithTests++;
+            }
+        }
+
+        summary.requirementsWithoutTests = summary.totalRequirements - summary.requirementsWithTests;
+        summary.coveragePercentage = summary.totalRequirements > 0 ? 
+            (summary.requirementsWithTests * 100.0 / summary.totalRequirements) : 0;
+        
+        return summary;
+    }
+
+    private void writeToCSV(List<FolderSummary> summaries) {
+        try {
+            String timestamp = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
+                .format(LocalDateTime.now());
+            String fileName = String.format("requirements_summary_%s.csv", timestamp);
+
+            try (FileWriter writer = new FileWriter(fileName)) {
+                // Write headers
+                writer.write("Metrics");
+                for (FolderSummary summary : summaries) {
+                    writer.write("," + summary.folderName);
+                }
+                writer.write("\n");
+
+                // Write total requirements
+                writer.write("Total Requirements");
+                for (FolderSummary summary : summaries) {
+                    writer.write("," + summary.totalRequirements);
+                }
+                writer.write("\n");
+
+                // Write requirements with tests
+                writer.write("Requirements With Tests");
+                for (FolderSummary summary : summaries) {
+                    writer.write("," + summary.requirementsWithTests);
+                }
+                writer.write("\n");
+
+                // Write requirements without tests
+                writer.write("Requirements Without Tests");
+                for (FolderSummary summary : summaries) {
+                    writer.write("," + summary.requirementsWithoutTests);
+                }
+                writer.write("\n");
+
+                // Write coverage percentage
+                writer.write("Coverage Percentage");
+                for (FolderSummary summary : summaries) {
+                    writer.write(String.format(",%.2f%%", summary.coveragePercentage));
+                }
+                writer.write("\n");
+            }
+
+            System.out.println("Summary exported to: " + fileName);
+
+        } catch (Exception e) {
+            System.err.println("Error writing to CSV: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    public void run() {
+        try {
+            // Step 1: Get parent folder ID from release ID
+            System.out.println("Getting parent folder ID for release: " + RELEASE_ID);
+            int parentFolderId = getParentFolderId();
+            
+            // Step 2: Get subfolders using parent folder ID
+            System.out.println("Getting subfolders for parent folder ID: " + parentFolderId);
+            List<FolderInfo> folders = getSubfolders(parentFolderId);
+            System.out.println("Found " + folders.size() + " subfolders");
+            
+            List<FolderSummary> allSummaries = new ArrayList<>();
+            
+            // Step 3: Process each subfolder
+            for (FolderInfo folder : folders) {
+                System.out.println("Processing folder: " + folder.name);
+                String requirementsUrl = String.format("%s/requirements?folderId=%d&maxResults=1000", 
+                    BASE_URL, folder.id);
+                JSONObject requirementsData = makeApiRequest(requirementsUrl);
+                FolderSummary summary = analyzeFolderRequirements(requirementsData, folder.name);
+                allSummaries.add(summary);
+            }
+            
+            writeToCSV(allSummaries);
+        } catch (Exception e) {
+            System.err.println("Error: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    public static void main(String[] args) {
+        ZephyrMetricsFetcher fetcher = new ZephyrMetricsFetcher();
+        fetcher.run();
+    }
+}
