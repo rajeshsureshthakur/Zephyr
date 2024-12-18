@@ -1,0 +1,292 @@
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.io.FileWriter;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.util.*;
+
+public class ZephyrMetricsFetcher {
+    private static final String ACCESS_TOKEN = "your_access_token_here";
+    private static final String BASE_URL = "https://api.zephyrscale.smartbear.com/v2";
+    private static final int RELEASE_ID = 13642; // Replace with your release ID
+    
+    // URL patterns for initial parent folder requests
+    private static final String REQUIREMENTS_PARENT_URL = BASE_URL + "/folders?releaseId=%d";
+    private static final String TESTCASES_PARENT_URL = BASE_URL + "/testrepositories?releaseId=%d";
+    
+    // URL patterns for subfolder contents
+    private static final String REQUIREMENTS_FOLDER_URL = BASE_URL + "/folders/%d";
+    private static final String REQUIREMENTS_ITEMS_URL = BASE_URL + "/requirements?folderId=%d&maxResults=1000";
+    private static final String TESTCASES_FOLDER_URL = BASE_URL + "/testrepositories/%d";
+    private static final String TESTCASES_ITEMS_URL = BASE_URL + "/testcases?folderId=%d&maxResults=1000";
+    
+    private final HttpClient client;
+
+    static class ParentFolder {
+        int id;
+        String name;
+        String type; // "requirements" or "tests"
+    }
+
+    static class FolderInfo {
+        int id;
+        String name;
+        String parentName;
+        String type;
+    }
+
+    static class FolderSummary {
+        String parentName;
+        String folderName;
+        int totalItems;
+        int itemsWithTests;
+        int itemsWithoutTests;
+        double coveragePercentage;
+        String type;
+    }
+
+    public ZephyrMetricsFetcher() {
+        this.client = HttpClient.newHttpClient();
+    }
+
+    private String makeRawApiRequest(String url) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header("Authorization", "Bearer " + ACCESS_TOKEN)
+            .header("Accept", "application/json")
+            .GET()
+            .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new RuntimeException("API request failed for URL " + url + " with status: " + response.statusCode());
+        }
+        
+        return response.body();
+    }
+
+    private JSONObject makeApiRequest(String url) throws Exception {
+        String responseBody = makeRawApiRequest(url);
+        return new JSONObject(responseBody);
+    }
+
+    private JSONArray makeApiArrayRequest(String url) throws Exception {
+        String responseBody = makeRawApiRequest(url);
+        return new JSONArray(responseBody);
+    }
+
+    private List<ParentFolder> getParentFolderIds() throws Exception {
+        List<ParentFolder> parentFolders = new ArrayList<>();
+        
+        // Get requirements parent folder
+        System.out.println("Fetching requirements parent folder...");
+        String reqUrl = String.format(REQUIREMENTS_PARENT_URL, RELEASE_ID);
+        JSONArray reqResponse = makeApiArrayRequest(reqUrl);
+        
+        for (int i = 0; i < reqResponse.length(); i++) {
+            JSONObject folder = reqResponse.getJSONObject(i);
+            if (folder.getString("name").toLowerCase().contains("nft")) {
+                ParentFolder parent = new ParentFolder();
+                parent.id = folder.getInt("id");
+                parent.name = folder.getString("name");
+                parent.type = "requirements";
+                parentFolders.add(parent);
+                System.out.println("Found requirements parent folder: " + parent.name);
+            }
+        }
+
+        // Get test cases parent folder
+        System.out.println("\nFetching test repositories parent folder...");
+        String testUrl = String.format(TESTCASES_PARENT_URL, RELEASE_ID);
+        String testResponse = makeRawApiRequest(testUrl);
+        
+        if (testResponse.trim().startsWith("[")) {
+            JSONArray testArray = new JSONArray(testResponse);
+            for (int i = 0; i < testArray.length(); i++) {
+                JSONObject folder = testArray.getJSONObject(i);
+                if (folder.getString("name").toLowerCase().contains("nft")) {
+                    ParentFolder parent = new ParentFolder();
+                    parent.id = folder.getInt("id");
+                    parent.name = folder.getString("name");
+                    parent.type = "tests";
+                    parentFolders.add(parent);
+                    System.out.println("Found test repositories parent folder: " + parent.name);
+                }
+            }
+        }
+        
+        return parentFolders;
+    }
+
+    private List<FolderInfo> getSubfolders(ParentFolder parentFolder) throws Exception {
+        List<FolderInfo> folders = new ArrayList<>();
+        
+        String url = String.format(
+            parentFolder.type.equals("requirements") ? REQUIREMENTS_FOLDER_URL : TESTCASES_FOLDER_URL,
+            parentFolder.id
+        );
+        
+        if (parentFolder.type.equals("requirements")) {
+            // Handle requirements folders (JSON Object response)
+            JSONObject parentFolderData = makeApiRequest(url);
+            JSONArray categories = parentFolderData.getJSONArray("categories");
+            
+            for (int i = 0; i < categories.length(); i++) {
+                JSONObject category = categories.getJSONObject(i);
+                FolderInfo folder = new FolderInfo();
+                folder.id = category.getInt("id");
+                folder.name = category.getString("name");
+                folder.parentName = parentFolder.name;
+                folder.type = parentFolder.type;
+                folders.add(folder);
+            }
+        } else {
+            // Handle test case folders (JSON Array response)
+            String rawResponse = makeRawApiRequest(url);
+            if (rawResponse.trim().startsWith("[")) {
+                JSONArray testFolders = new JSONArray(rawResponse);
+                
+                for (int i = 0; i < testFolders.length(); i++) {
+                    JSONObject testFolder = testFolders.getJSONObject(i);
+                    FolderInfo folder = new FolderInfo();
+                    folder.id = testFolder.getInt("id");
+                    folder.name = testFolder.getString("name");
+                    folder.parentName = parentFolder.name;
+                    folder.type = parentFolder.type;
+                    folders.add(folder);
+                }
+            }
+        }
+        
+        return folders;
+    }
+
+    private String getItemsUrl(FolderInfo folder) {
+        return String.format(
+            folder.type.equals("requirements") ? REQUIREMENTS_ITEMS_URL : TESTCASES_ITEMS_URL,
+            folder.id
+        );
+    }
+
+    private FolderSummary analyzeFolder(JSONObject response, FolderInfo folder) {
+        FolderSummary summary = new FolderSummary();
+        summary.parentName = folder.parentName;
+        summary.folderName = folder.name;
+        summary.totalItems = response.getInt("resultSize");
+        summary.type = folder.type;
+        
+        JSONArray items = response.getJSONArray("results");
+        summary.itemsWithTests = 0;
+
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.getJSONObject(i);
+            if (folder.type.equals("requirements")) {
+                if (item.has("testcaseIds") && !item.getJSONArray("testcaseIds").isEmpty()) {
+                    summary.itemsWithTests++;
+                }
+            } else {
+                String status = item.optString("status", "UNEXECUTED");
+                if (!status.equalsIgnoreCase("UNEXECUTED")) {
+                    summary.itemsWithTests++;
+                }
+            }
+        }
+
+        summary.itemsWithoutTests = summary.totalItems - summary.itemsWithTests;
+        summary.coveragePercentage = summary.totalItems > 0 ? 
+            (summary.itemsWithTests * 100.0 / summary.totalItems) : 0;
+        
+        return summary;
+    }
+
+    private void writeToCSV(List<FolderSummary> summaries) {
+        try {
+            String timestamp = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
+                .format(LocalDateTime.now());
+            String fileName = String.format("zephyr_analysis_%s.csv", timestamp);
+
+            try (FileWriter writer = new FileWriter(fileName)) {
+                // Write headers
+                writer.write("Type,Parent Folder,Subfolder,Total Items,Items With Tests,Items Without Tests,Coverage Percentage\n");
+
+                // Sort and write requirements first
+                List<FolderSummary> reqSummaries = summaries.stream()
+                    .filter(s -> s.type.equals("requirements"))
+                    .sorted(Comparator.comparing(s -> s.folderName))
+                    .toList();
+
+                // Sort and write test cases second
+                List<FolderSummary> testSummaries = summaries.stream()
+                    .filter(s -> s.type.equals("tests"))
+                    .sorted(Comparator.comparing(s -> s.folderName))
+                    .toList();
+
+                // Write all data
+                for (FolderSummary summary : reqSummaries) {
+                    writeSummaryLine(writer, summary);
+                }
+                
+                writer.write("\n"); // Add separator line
+                
+                for (FolderSummary summary : testSummaries) {
+                    writeSummaryLine(writer, summary);
+                }
+            }
+
+            System.out.println("Analysis exported to: " + fileName);
+
+        } catch (Exception e) {
+            System.err.println("Error writing to CSV: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    private void writeSummaryLine(FileWriter writer, FolderSummary summary) throws Exception {
+        writer.write(String.format("%s,%s,%s,%d,%d,%d,%.2f%%\n",
+            summary.type,
+            summary.parentName,
+            summary.folderName,
+            summary.totalItems,
+            summary.itemsWithTests,
+            summary.itemsWithoutTests,
+            summary.coveragePercentage
+        ));
+    }
+
+    public void run() {
+        try {
+            System.out.println("Starting analysis for release ID: " + RELEASE_ID);
+            List<ParentFolder> parentFolders = getParentFolderIds();
+            List<FolderSummary> allSummaries = new ArrayList<>();
+            
+            for (ParentFolder parentFolder : parentFolders) {
+                System.out.println("\nProcessing parent folder: " + parentFolder.name + " (" + parentFolder.type + ")");
+                List<FolderInfo> subfolders = getSubfolders(parentFolder);
+                System.out.println("Found " + subfolders.size() + " subfolders");
+                
+                for (FolderInfo folder : subfolders) {
+                    System.out.println("Processing subfolder: " + folder.name);
+                    String itemsUrl = getItemsUrl(folder);
+                    JSONObject itemsData = makeApiRequest(itemsUrl);
+                    FolderSummary summary = analyzeFolder(itemsData, folder);
+                    allSummaries.add(summary);
+                }
+            }
+            
+            writeToCSV(allSummaries);
+        } catch (Exception e) {
+            System.err.println("Error: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    public static void main(String[] args) {
+        ZephyrMetricsFetcher fetcher = new ZephyrMetricsFetcher();
+        fetcher.run();
+    }
+}
