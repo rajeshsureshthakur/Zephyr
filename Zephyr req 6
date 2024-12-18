@@ -1,0 +1,72 @@
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.io.FileWriter;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.util.*;
+
+public class ZephyrMetricsFetcher {
+    private static final String ACCESS_TOKEN = "your_access_token_here";
+    private static final String BASE_URL = "https://api.zephyrscale.smartbear.com/v2";
+    private static final int RELEASE_ID = 13642; // Replace with your release ID
+    
+    // URL patterns for initial parent folder requests
+    private static final String REQUIREMENTS_PARENT_URL = BASE_URL + "/folders?releaseId=%d";
+    private static final String TESTCASES_PARENT_URL = BASE_URL + "/testrepositories?releaseId=%d";
+    
+    // URL patterns for subfolder contents
+    private static final String REQUIREMENTS_FOLDER_URL = BASE_URL + "/folders/%d";
+    private static final String REQUIREMENTS_ITEMS_URL = BASE_URL + "/requirements?folderId=%d&maxResults=1000";
+    private static final String TESTCASES_FOLDER_URL = BASE_URL + "/testrepositories/%d";
+    private static final String TESTCASES_ITEMS_URL = BASE_URL + "/testcases?folderId=%d&maxResults=1000";
+    
+    private final HttpClient client;
+
+    // ... [Previous class definitions remain the same] ...
+
+    public ZephyrMetricsFetcher() {
+        this.client = HttpClient.newHttpClient();
+    }
+
+    private List<ParentFolder> getParentFolderIds() throws Exception {
+        List<ParentFolder> parentFolders = new ArrayList<>();
+        
+        // Get requirements parent folder
+        System.out.println("Fetching requirements parent folder...");
+        String reqUrl = String.format(REQUIREMENTS_PARENT_URL, RELEASE_ID);
+        JSONArray reqResponse = makeApiArrayRequest(reqUrl);
+        
+        for (int i = 0; i < reqResponse.length(); i++) {
+            JSONObject folder = reqResponse.getJSONObject(i);
+            ParentFolder parent = new ParentFolder();
+            parent.id = folder.getInt("id");
+            parent.name = folder.getString("name");
+            parent.type = "requirements";
+            parentFolders.add(parent);
+            System.out.println("Found requirements parent folder: " + parent.name);
+        }
+
+        // Get test cases parent folder
+        System.out.println("\nFetching test repositories parent folder...");
+        String testUrl = String.format(TESTCASES_PARENT_URL, RELEASE_ID);
+        JSONArray testResponse = makeApiArrayRequest(testUrl);
+        
+        for (int i = 0; i < testResponse.length(); i++) {
+            JSONObject folder = testResponse.getJSONObject(i);
+            ParentFolder parent = new ParentFolder();
+            parent.id = folder.getInt("id");
+            parent.name = folder.getString("name");
+            parent.type = "tests";
+            parentFolders.add(parent);
+            System.out.println("Found test repositories parent folder: " + parent.name);
+        }
+        
+        return parentFolders;
+    }
+
+    // ... [Rest of the code remains the same] ...
+}
