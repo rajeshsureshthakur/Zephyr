@@ -1,0 +1,252 @@
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.io.FileWriter;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.util.*;
+
+public class ZephyrMetricsFetcher {
+    private static final String ACCESS_TOKEN = "your_access_token_here";
+    private static final String BASE_URL = "https://api.zephyrscale.smartbear.com/v2";
+    private static final int RELEASE_ID = 13642; // Replace with your release ID
+    
+    // Separate URL patterns for requirements and test cases
+    private static final String REQUIREMENTS_FOLDER_URL = BASE_URL + "/folders/%d";
+    private static final String REQUIREMENTS_ITEMS_URL = BASE_URL + "/requirements?folderId=%d&maxResults=1000";
+    private static final String TESTCASES_FOLDER_URL = BASE_URL + "/testrepositories/%d";
+    private static final String TESTCASES_ITEMS_URL = BASE_URL + "/testcases?folderId=%d&maxResults=1000";
+    
+    private final HttpClient client;
+
+    static class ParentFolder {
+        int id;
+        String name;
+        String type; // "requirements" or "tests"
+    }
+
+    static class FolderInfo {
+        int id;
+        String name;
+        String parentName;
+    }
+
+    static class FolderSummary {
+        String parentName;
+        String folderName;
+        int totalItems;
+        int itemsWithTests;
+        int itemsWithoutTests;
+        double coveragePercentage;
+    }
+
+    public ZephyrMetricsFetcher() {
+        this.client = HttpClient.newHttpClient();
+    }
+
+    private JSONObject makeApiRequest(String url) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header("Authorization", "Bearer " + ACCESS_TOKEN)
+            .header("Accept", "application/json")
+            .GET()
+            .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new RuntimeException("API request failed for URL " + url + " with status: " + response.statusCode());
+        }
+        
+        return new JSONObject(response.body());
+    }
+
+    private JSONArray makeApiArrayRequest(String url) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header("Authorization", "Bearer " + ACCESS_TOKEN)
+            .header("Accept", "application/json")
+            .GET()
+            .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new RuntimeException("API request failed for URL " + url + " with status: " + response.statusCode());
+        }
+        
+        return new JSONArray(response.body());
+    }
+
+    private List<ParentFolder> getParentFolderIds() throws Exception {
+        String url = String.format("%s/folders?releaseId=%d", BASE_URL, RELEASE_ID);
+        JSONArray response = makeApiArrayRequest(url);
+        List<ParentFolder> parentFolders = new ArrayList<>();
+        
+        for (int i = 0; i < response.length(); i++) {
+            JSONObject folder = response.getJSONObject(i);
+            ParentFolder parent = new ParentFolder();
+            parent.id = folder.getInt("id");
+            parent.name = folder.getString("name");
+            parent.type = parent.name.toLowerCase().contains("test") ? "tests" : "requirements";
+            parentFolders.add(parent);
+            System.out.println("Found parent folder: " + parent.name + " (Type: " + parent.type + ")");
+        }
+        
+        return parentFolders;
+    }
+
+    private List<FolderInfo> getSubfolders(ParentFolder parentFolder) throws Exception {
+        List<FolderInfo> folders = new ArrayList<>();
+        
+        // Choose the appropriate URL based on folder type
+        String url = String.format(
+            parentFolder.type.equals("requirements") ? REQUIREMENTS_FOLDER_URL : TESTCASES_FOLDER_URL,
+            parentFolder.id
+        );
+        
+        JSONObject parentFolderData = makeApiRequest(url);
+        
+        // The JSON structure might be different for test repositories
+        JSONArray categories = parentFolder.type.equals("requirements") ?
+            parentFolderData.getJSONArray("categories") :
+            parentFolderData.getJSONArray("folders"); // Adjust based on actual response structure
+        
+        for (int i = 0; i < categories.length(); i++) {
+            JSONObject category = categories.getJSONObject(i);
+            FolderInfo folder = new FolderInfo();
+            folder.id = category.getInt("id");
+            folder.name = category.getString("name");
+            folder.parentName = parentFolder.name;
+            folders.add(folder);
+        }
+        
+        return folders;
+    }
+
+    private String getItemsUrl(FolderInfo folder, String type) {
+        return String.format(
+            type.equals("requirements") ? REQUIREMENTS_ITEMS_URL : TESTCASES_ITEMS_URL,
+            folder.id
+        );
+    }
+
+    private FolderSummary analyzeFolder(JSONObject response, FolderInfo folder, String type) {
+        FolderSummary summary = new FolderSummary();
+        summary.parentName = folder.parentName;
+        summary.folderName = folder.name;
+        summary.totalItems = response.getInt("resultSize");
+        
+        JSONArray items = response.getJSONArray("results");
+        summary.itemsWithTests = 0;
+
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.getJSONObject(i);
+            if (type.equals("requirements")) {
+                if (item.has("testcaseIds") && !item.getJSONArray("testcaseIds").isEmpty()) {
+                    summary.itemsWithTests++;
+                }
+            } else {
+                // For test cases, check execution status
+                String status = item.optString("status", "UNEXECUTED");
+                if (!status.equalsIgnoreCase("UNEXECUTED")) {
+                    summary.itemsWithTests++;
+                }
+            }
+        }
+
+        summary.itemsWithoutTests = summary.totalItems - summary.itemsWithTests;
+        summary.coveragePercentage = summary.totalItems > 0 ? 
+            (summary.itemsWithTests * 100.0 / summary.totalItems) : 0;
+        
+        return summary;
+    }
+
+    private void writeToCSV(List<FolderSummary> summaries) {
+        try {
+            String timestamp = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
+                .format(LocalDateTime.now());
+            String fileName = String.format("folder_analysis_%s.csv", timestamp);
+
+            try (FileWriter writer = new FileWriter(fileName)) {
+                // Write headers
+                writer.write("Parent Folder,Subfolder,Total Items,Items With Tests,Items Without Tests,Coverage Percentage\n");
+
+                // Write requirements data first
+                List<FolderSummary> reqSummaries = summaries.stream()
+                    .filter(s -> s.parentName.toLowerCase().contains("requirement"))
+                    .sorted(Comparator.comparing(s -> s.folderName))
+                    .toList();
+
+                // Then write test cases data
+                List<FolderSummary> testSummaries = summaries.stream()
+                    .filter(s -> s.parentName.toLowerCase().contains("test"))
+                    .sorted(Comparator.comparing(s -> s.folderName))
+                    .toList();
+
+                // Write all data
+                for (FolderSummary summary : reqSummaries) {
+                    writeSummaryLine(writer, summary);
+                }
+                
+                writer.write("\n"); // Add separator line
+                
+                for (FolderSummary summary : testSummaries) {
+                    writeSummaryLine(writer, summary);
+                }
+            }
+
+            System.out.println("Summary exported to: " + fileName);
+
+        } catch (Exception e) {
+            System.err.println("Error writing to CSV: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    private void writeSummaryLine(FileWriter writer, FolderSummary summary) throws Exception {
+        writer.write(String.format("%s,%s,%d,%d,%d,%.2f%%\n",
+            summary.parentName,
+            summary.folderName,
+            summary.totalItems,
+            summary.itemsWithTests,
+            summary.itemsWithoutTests,
+            summary.coveragePercentage
+        ));
+    }
+
+    public void run() {
+        try {
+            System.out.println("Getting parent folders for release: " + RELEASE_ID);
+            List<ParentFolder> parentFolders = getParentFolderIds();
+            List<FolderSummary> allSummaries = new ArrayList<>();
+            
+            for (ParentFolder parentFolder : parentFolders) {
+                System.out.println("\nProcessing parent folder: " + parentFolder.name);
+                List<FolderInfo> subfolders = getSubfolders(parentFolder);
+                System.out.println("Found " + subfolders.size() + " subfolders");
+                
+                for (FolderInfo folder : subfolders) {
+                    System.out.println("Processing subfolder: " + folder.name);
+                    String itemsUrl = getItemsUrl(folder, parentFolder.type);
+                    JSONObject itemsData = makeApiRequest(itemsUrl);
+                    FolderSummary summary = analyzeFolder(itemsData, folder, parentFolder.type);
+                    allSummaries.add(summary);
+                }
+            }
+            
+            writeToCSV(allSummaries);
+        } catch (Exception e) {
+            System.err.println("Error: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    public static void main(String[] args) {
+        ZephyrMetricsFetcher fetcher = new ZephyrMetricsFetcher();
+        fetcher.run();
+    }
+}
