@@ -1,3 +1,78 @@
+// ... [Previous imports and class definitions remain the same until getParentFolderIds method] ...
+
+    private List<ParentFolder> getParentFolderIds() throws Exception {
+        List<ParentFolder> parentFolders = new ArrayList<>();
+        
+        // Get requirements parent folder
+        System.out.println("Fetching requirements parent folder...");
+        String reqUrl = String.format(REQUIREMENTS_PARENT_URL, RELEASE_ID);
+        JSONArray reqResponse = makeApiArrayRequest(reqUrl);
+        
+        for (int i = 0; i < reqResponse.length(); i++) {
+            JSONObject folder = reqResponse.getJSONObject(i);
+            if (folder.getString("name").toLowerCase().contains("nft")) {  // Adjust the condition as needed
+                ParentFolder parent = new ParentFolder();
+                parent.id = folder.getInt("id");
+                parent.name = folder.getString("name");
+                parent.type = "requirements";
+                parentFolders.add(parent);
+                System.out.println("Found requirements parent folder: " + parent.name);
+            }
+        }
+
+        // Get test cases parent folder from array response
+        System.out.println("\nFetching test repositories parent folder...");
+        String testUrl = String.format(TESTCASES_PARENT_URL, RELEASE_ID);
+        String testResponse = makeRawApiRequest(testUrl); // Get raw response string
+        
+        // Handle array response for test cases
+        if (testResponse.trim().startsWith("[")) {
+            JSONArray testArray = new JSONArray(testResponse);
+            for (int i = 0; i < testArray.length(); i++) {
+                JSONObject folder = testArray.getJSONObject(i);
+                if (folder.getString("name").toLowerCase().contains("nft")) {  // Adjust the condition as needed
+                    ParentFolder parent = new ParentFolder();
+                    parent.id = folder.getInt("id");
+                    parent.name = folder.getString("name");
+                    parent.type = "tests";
+                    parentFolders.add(parent);
+                    System.out.println("Found test repositories parent folder: " + parent.name);
+                }
+            }
+        } else {
+            System.err.println("Unexpected response format for test repositories");
+        }
+        
+        return parentFolders;
+    }
+
+    // Add new method to get raw response
+    private String makeRawApiRequest(String url) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header("Authorization", "Bearer " + ACCESS_TOKEN)
+            .header("Accept", "application/json")
+            .GET()
+            .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new RuntimeException("API request failed for URL " + url + " with status: " + response.statusCode());
+        }
+        
+        return response.body();
+    }
+
+// ... [Rest of the code remains the same] ...
+
+
+
+
+
+
+
+
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
