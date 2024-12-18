@@ -1,0 +1,110 @@
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.io.FileWriter;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+public class ZephyrMetricsFetcher {
+    private static final String BASE_URL = "https://api.zephyrscale.smartbear.com/v2/requirements?maxResults=1000";
+    private static final String ACCESS_TOKEN = "your_access_token_here"; // Replace with your access token
+    private final HttpClient client;
+
+    public ZephyrMetricsFetcher() {
+        this.client = HttpClient.newHttpClient();
+    }
+
+    private JSONObject fetchRequirements() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(BASE_URL))
+            .header("Authorization", "Bearer " + ACCESS_TOKEN)
+            .header("Accept", "application/json")
+            .GET()
+            .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new RuntimeException("API request failed with status: " + response.statusCode());
+        }
+        
+        return new JSONObject(response.body());
+    }
+
+    private void writeToCSV(JSONObject requirementsResponse) {
+        try {
+            int totalRequirements = requirementsResponse.getInt("resultSize");
+            JSONArray requirements = requirementsResponse.getJSONArray("results");
+            
+            String timestamp = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
+                .format(LocalDateTime.now());
+            String fileName = String.format("requirements_analysis_%s.csv", timestamp);
+
+            try (FileWriter writer = new FileWriter(fileName)) {
+                // Headers
+                writer.write("Requirement ID,Name,Status,Priority,Has Test Cases,Test Case Count\n");
+
+                // Process each requirement
+                int requirementsWithTests = 0;
+                for (int i = 0; i < requirements.length(); i++) {
+                    JSONObject req = requirements.getJSONObject(i);
+                    int id = req.getInt("id");
+                    String name = req.optString("name", "N/A");
+                    String status = req.optString("status", "N/A");
+                    String priority = req.optString("priority", "N/A");
+                    
+                    boolean hasTestCases = req.has("testcaseIds") && 
+                        !req.getJSONArray("testcaseIds").isEmpty();
+                    int testCaseCount = hasTestCases ? 
+                        req.getJSONArray("testcaseIds").length() : 0;
+
+                    if (hasTestCases) {
+                        requirementsWithTests++;
+                    }
+
+                    writer.write(String.format("%d,\"%s\",%s,%s,%s,%d\n",
+                        id,
+                        name.replace("\"", "\"\""),
+                        status,
+                        priority,
+                        hasTestCases,
+                        testCaseCount
+                    ));
+                }
+
+                // Write summary at the end
+                writer.write("\nSummary\n");
+                writer.write(String.format("Total Requirements,%d\n", totalRequirements));
+                writer.write(String.format("With Test Cases,%d\n", requirementsWithTests));
+                writer.write(String.format("Without Test Cases,%d\n", 
+                    totalRequirements - requirementsWithTests));
+                writer.write(String.format("Coverage Percentage,%.2f%%\n", 
+                    (requirementsWithTests * 100.0 / totalRequirements)));
+            }
+
+            System.out.println("Analysis exported to: " + fileName);
+
+        } catch (Exception e) {
+            System.err.println("Error writing to CSV: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    public void run() {
+        try {
+            JSONObject requirementsData = fetchRequirements();
+            writeToCSV(requirementsData);
+        } catch (Exception e) {
+            System.err.println("Error: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    public static void main(String[] args) {
+        ZephyrMetricsFetcher fetcher = new ZephyrMetricsFetcher();
+        fetcher.run();
+    }
+}
